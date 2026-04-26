@@ -60,8 +60,29 @@ session_folder = config.SESSION_FOLDER
 os.makedirs(session_folder, exist_ok=True)
 
 sessions = [f.replace('.session', '') for f in os.listdir(session_folder) if f.endswith('.session')]
-last_used = {}
-user_data = {}
+
+# ========== БАЗА ДАННЫХ ДЛЯ ВРЕМЕННЫХ ДАННЫХ ==========
+conn = sqlite3.connect('user_data.db', check_same_thread=False)
+c = conn.cursor()
+c.execute('''CREATE TABLE IF NOT EXISTS temp_data(
+    user_id INTEGER PRIMARY KEY,
+    scam_channel TEXT,
+    scam_reason TEXT
+)''')
+conn.commit()
+
+def save_temp_data(user_id, channel, reason):
+    c.execute("INSERT OR REPLACE INTO temp_data (user_id, scam_channel, scam_reason) VALUES (?, ?, ?)", (user_id, channel, reason))
+    conn.commit()
+
+def get_temp_data(user_id):
+    c.execute("SELECT scam_channel, scam_reason FROM temp_data WHERE user_id = ?", (user_id,))
+    res = c.fetchone()
+    return res if res else (None, None)
+
+def delete_temp_data(user_id):
+    c.execute("DELETE FROM temp_data WHERE user_id = ?", (user_id,))
+    conn.commit()
 
 # ========== КЛАВИАТУРЫ ==========
 menu = types.InlineKeyboardMarkup(row_width=2)
@@ -103,7 +124,7 @@ scam_markup.add(
 )
 scam_markup.add(back)
 
-# ========== БАЗА ДАННЫХ ==========
+# ========== БАЗА ДАННЫХ ПОЛЬЗОВАТЕЛЕЙ ==========
 def init_db():
     conn = sqlite3.connect('users.db')
     c = conn.cursor()
@@ -341,6 +362,7 @@ async def send_scam_report(channel, reason, comment, user_id):
             continue
     
     bot.send_message(user_id, f"🎭 Scam-репорт!\n✅ Успешно: {ok}\n❌ Ошибок: {fail}", reply_markup=back_markup)
+    delete_temp_data(user_id)
 
 # ========== КОМАНДЫ БОТА ==========
 @bot.message_handler(commands=['start'])
@@ -462,11 +484,6 @@ def main_callback(call):
         if not has_active:
             bot.send_message(uid, "❌ У вас нет активной подписки!", reply_markup=shop_markup)
             return
-        if uid in last_used and (datetime.now() - last_used[uid]) < timedelta(minutes=5):
-            sec = int((timedelta(minutes=5) - (datetime.now() - last_used[uid])).total_seconds())
-            bot.send_message(uid, f"⏳ Ждите {sec} секунд")
-            return
-        last_used[uid] = datetime.now()
         m = bot.send_message(uid, "🔗 Введите ссылку на сообщение:\nhttps://t.me/username/12345")
         bot.register_next_step_handler(m, process_link)
     
@@ -474,20 +491,16 @@ def main_callback(call):
         if not has_active:
             bot.send_message(uid, "❌ У вас нет активной подписки!", reply_markup=shop_markup)
             return
-        if uid in last_used and (datetime.now() - last_used[uid]) < timedelta(minutes=5):
-            sec = int((timedelta(minutes=5) - (datetime.now() - last_used[uid])).total_seconds())
-            bot.send_message(uid, f"⏳ Ждите {sec} секунд")
-            return
-        last_used[uid] = datetime.now()
         m = bot.send_message(uid, "🔗 Введите ссылку на **канал**:\nhttps://t.me/username")
         bot.register_next_step_handler(m, process_scam_channel)
     
     elif call.data.startswith('scam_reason_'):
-        if uid not in user_data:
+        channel, _ = get_temp_data(uid)
+        if not channel:
             bot.send_message(uid, "❌ Ошибка, начните заново /start")
             return
         reason = call.data.split('_')[2]
-        user_data[uid]['scam_reason'] = reason
+        save_temp_data(uid, channel, reason)
         msg = bot.send_message(uid, "📝 Введите комментарий (или '-' чтобы пропустить):")
         bot.register_next_step_handler(msg, process_scam_comment)
     
@@ -543,7 +556,7 @@ def process_scam_channel(msg):
     url = msg.text.strip()
     try:
         channel = extract_channel_only(url)
-        user_data[uid] = {'scam_channel': channel}
+        save_temp_data(uid, channel, None)
         bot.send_message(uid, "🎭 Выберите причину:", reply_markup=scam_markup)
     except ValueError as e:
         bot.send_message(uid, f"❌ {e}")
@@ -554,17 +567,13 @@ def process_scam_comment(msg):
     if comment == '-':
         comment = ''
     
-    if uid not in user_data or 'scam_channel' not in user_data or 'scam_reason' not in user_data:
+    channel, reason = get_temp_data(uid)
+    if not channel or not reason:
         bot.send_message(uid, "❌ Ошибка, начните заново /start")
         return
     
-    channel = user_data[uid]['scam_channel']
-    reason = user_data[uid]['scam_reason']
-    
     bot.send_message(uid, "🎭 Запускаю Scam-репорт...")
     asyncio.run(send_scam_report(channel, reason, comment, uid))
-    
-    del user_data[uid]
 
 def add_sub2(msg):
     if msg.from_user.id not in config.ADMINS:
