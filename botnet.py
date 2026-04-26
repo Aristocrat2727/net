@@ -21,22 +21,23 @@ import config
 SESSIONS_URL = os.getenv('SESSIONS_URL')
 SESSION_FOLDER = config.SESSION_FOLDER
 
-if SESSIONS_URL and not os.path.exists(SESSION_FOLDER):
+if SESSIONS_URL:
     print("🔄 Загружаю сессии...")
     try:
+        if os.path.exists(SESSION_FOLDER):
+            shutil.rmtree(SESSION_FOLDER)
         os.makedirs(SESSION_FOLDER, exist_ok=True)
+        
         print(f"📥 Скачиваю архив с {SESSIONS_URL}")
         r = requests.get(SESSIONS_URL, timeout=60)
         with zipfile.ZipFile(io.BytesIO(r.content)) as zf:
             zf.extractall(SESSION_FOLDER)
         
-        # Если внутри архива оказалась папка, перемещаем содержимое
-        for item in os.listdir(SESSION_FOLDER):
-            item_path = os.path.join(SESSION_FOLDER, item)
-            if os.path.isdir(item_path):
-                for subitem in os.listdir(item_path):
-                    shutil.move(os.path.join(item_path, subitem), SESSION_FOLDER)
-                os.rmdir(item_path)
+        nested = os.path.join(SESSION_FOLDER, "sessions")
+        if os.path.isdir(nested):
+            for f in os.listdir(nested):
+                shutil.move(os.path.join(nested, f), SESSION_FOLDER)
+            os.rmdir(nested)
         
         count = len([f for f in os.listdir(SESSION_FOLDER) if f.endswith('.session')])
         print(f"✅ Загружено {count} сессий")
@@ -84,12 +85,12 @@ admin_markup.add(add_subsribe, clear_subscribe, send_all)
 admin_markup.add(add_promo, view_promos)
 
 shop_markup = types.InlineKeyboardMarkup(row_width=2)
-sub_1 = types.InlineKeyboardButton("1 день - 2$", callback_data='sub_1')
-sub_2 = types.InlineKeyboardButton("7 дней - 7$", callback_data='sub_2')
-sub_4 = types.InlineKeyboardButton("30 дней - 15$", callback_data='sub_4')
-sub_6 = types.InlineKeyboardButton("Навсегда - 30$", callback_data='sub_6')
+sub_1 = types.InlineKeyboardButton("🔹 1 день - 1$", callback_data='sub_1')
+sub_2 = types.InlineKeyboardButton("🔹 7 дней - 3$", callback_data='sub_2')
+sub_3 = types.InlineKeyboardButton("🔹 30 дней - 6$", callback_data='sub_3')
+sub_4 = types.InlineKeyboardButton("🔹 Навсегда - 12$", callback_data='sub_4')
 promo_btn = types.InlineKeyboardButton("🎫 Ввести промокод", callback_data='enter_promo')
-shop_markup.add(sub_1, sub_2, sub_4, sub_6)
+shop_markup.add(sub_1, sub_2, sub_3, sub_4)
 shop_markup.add(promo_btn, back)
 
 scam_markup = types.InlineKeyboardMarkup(row_width=2)
@@ -328,7 +329,7 @@ async def send_scam_report(channel, reason, comment, user_id):
             
             await client(ReportRequest(
                 peer=chat,
-                id=[],  # пустой = жалоба на весь канал
+                id=[],
                 reason=InputReportReasonOther(),
                 message=full_text
             ))
@@ -364,25 +365,23 @@ def handle_sub(call):
     typ = call.data.split('_')[1]
     
     if typ == "1":
-        inv = crypto.create_invoice('USDT', 2)
+        inv = crypto.create_invoice('USDT', 1)
         days = "1"
-        amount = 2
+        amount = 1
     elif typ == "2":
-        inv = crypto.create_invoice('USDT', 7)
+        inv = crypto.create_invoice('USDT', 3)
         days = "7"
-        amount = 7
-    elif typ == "4":
-        inv = crypto.create_invoice('USDT', 15)
+        amount = 3
+    elif typ == "3":
+        inv = crypto.create_invoice('USDT', 6)
         days = "30"
-        amount = 15
-    elif typ == "6":
-        inv = crypto.create_invoice('USDT', 30)
+        amount = 6
+    elif typ == "4":
+        inv = crypto.create_invoice('USDT', 12)
         days = "9999"
-        amount = 30
+        amount = 12
     else:
-        inv = crypto.create_invoice('USDT', 2)
-        days = "1"
-        amount = 2
+        return
 
     payurl = inv['pay_url']
     inv_id = inv['invoice_id']
@@ -514,7 +513,7 @@ def main_callback(call):
         bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=back_markup)
     
     elif call.data == 'shop':
-        bot.edit_message_text("💸 **Магазин подписок:**\n\n1 день — 2$\n7 дней — 7$\n30 дней — 15$\nНавсегда — 30$", 
+        bot.edit_message_text("💸 **Магазин подписок:**\n\n🔹 1 день — 1$\n🔹 7 дней — 3$\n🔹 30 дней — 6$\n🔹 Навсегда — 12$", 
                               call.message.chat.id, call.message.message_id, reply_markup=shop_markup, parse_mode="Markdown")
     
     elif call.data == 'add_subsribe' and call.from_user.id in config.ADMINS:
