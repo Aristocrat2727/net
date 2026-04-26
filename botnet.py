@@ -5,6 +5,7 @@ import asyncio
 import zipfile
 import requests
 import io
+import secrets
 from datetime import datetime, timedelta
 from telethon import TelegramClient
 from telethon.errors import FloodWaitError
@@ -59,26 +60,138 @@ back = types.InlineKeyboardButton("🔙 Назад", callback_data='back')
 back_markup.add(back)
 
 admin_markup = types.InlineKeyboardMarkup(row_width=2)
-add_subsribe = types.InlineKeyboardButton("Выдать подписку", callback_data='add_subsribe')
-clear_subscribe = types.InlineKeyboardButton("Забрать подписку", callback_data='clear_subscribe')
-send_all = types.InlineKeyboardButton("Рассылка", callback_data='send_all')
+add_subsribe = types.InlineKeyboardButton("➕ Выдать подписку", callback_data='add_subsribe')
+clear_subscribe = types.InlineKeyboardButton("❌ Забрать подписку", callback_data='clear_subscribe')
+send_all = types.InlineKeyboardButton("📢 Рассылка", callback_data='send_all')
+add_promo = types.InlineKeyboardButton("🎫 Создать промокод", callback_data='add_promo')
+view_promos = types.InlineKeyboardButton("📋 Список промокодов", callback_data='view_promos')
 admin_markup.add(add_subsribe, clear_subscribe, send_all)
+admin_markup.add(add_promo, view_promos)
 
 shop_markup = types.InlineKeyboardMarkup(row_width=2)
-sub_1 = types.InlineKeyboardButton("1 день", callback_data='sub_1')
-sub_2 = types.InlineKeyboardButton("7 дней", callback_data='sub_2')
-sub_4 = types.InlineKeyboardButton("30 дней", callback_data='sub_4')
-sub_6 = types.InlineKeyboardButton("Навсегда", callback_data='sub_6')
-shop_markup.add(sub_1, sub_2, sub_4, sub_6, back)
+sub_1 = types.InlineKeyboardButton("1 день - 2$", callback_data='sub_1')
+sub_2 = types.InlineKeyboardButton("7 дней - 7$", callback_data='sub_2')
+sub_4 = types.InlineKeyboardButton("30 дней - 15$", callback_data='sub_4')
+sub_6 = types.InlineKeyboardButton("Навсегда - 30$", callback_data='sub_6')
+promo_btn = types.InlineKeyboardButton("🎫 Ввести промокод", callback_data='enter_promo')
+shop_markup.add(sub_1, sub_2, sub_4, sub_6)
+shop_markup.add(promo_btn, back)
 
 # ========== БАЗА ДАННЫХ ==========
+def init_db():
+    conn = sqlite3.connect('users.db')
+    c = conn.cursor()
+    c.execute('''CREATE TABLE IF NOT EXISTS users(
+        user_id INTEGER PRIMARY KEY,
+        subscribe TEXT,
+        username TEXT,
+        first_name TEXT
+    )''')
+    c.execute('''CREATE TABLE IF NOT EXISTS promocodes(
+        code TEXT PRIMARY KEY,
+        days INTEGER,
+        used_by INTEGER,
+        created_by INTEGER,
+        created_at TEXT,
+        used_at TEXT
+    )''')
+    conn.commit()
+    conn.close()
+
+init_db()
+
+def get_sub_status(user_id):
+    conn = sqlite3.connect('users.db')
+    c = conn.cursor()
+    c.execute("SELECT subscribe FROM users WHERE user_id = ?", (user_id,))
+    res = c.fetchone()
+    conn.close()
+    if not res:
+        return None
+    return res[0]
+
+def has_sub(user_id):
+    sub = get_sub_status(user_id)
+    if not sub or sub == "None" or sub == "0":
+        return False
+    try:
+        sub_date = datetime.strptime(sub, "%Y-%m-%d %H:%M:%S")
+        return sub_date > datetime.now()
+    except:
+        return False
+
+def set_sub(user_id, days, admin_id=None):
+    conn = sqlite3.connect('users.db')
+    c = conn.cursor()
+    current = get_sub_status(user_id)
+    if current and current != "None" and current != "0":
+        try:
+            old_date = datetime.strptime(current, "%Y-%m-%d %H:%M:%S")
+            if old_date > datetime.now():
+                new_date = old_date + timedelta(days=days)
+            else:
+                new_date = datetime.now() + timedelta(days=days)
+        except:
+            new_date = datetime.now() + timedelta(days=days)
+    else:
+        new_date = datetime.now() + timedelta(days=days)
+    
+    new_date_str = new_date.strftime("%Y-%m-%d %H:%M:%S")
+    c.execute("INSERT OR REPLACE INTO users (user_id, subscribe) VALUES (?, ?)", (user_id, new_date_str))
+    conn.commit()
+    conn.close()
+    return new_date_str
+
+def remove_sub(user_id):
+    conn = sqlite3.connect('users.db')
+    c = conn.cursor()
+    c.execute("UPDATE users SET subscribe = 'None' WHERE user_id = ?", (user_id,))
+    conn.commit()
+    conn.close()
+
+def create_promo_code(days, admin_id):
+    code = secrets.token_hex(8).upper()
+    conn = sqlite3.connect('users.db')
+    c = conn.cursor()
+    c.execute("INSERT INTO promocodes (code, days, created_by, created_at) VALUES (?, ?, ?, ?)",
+              (code, days, admin_id, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+    conn.commit()
+    conn.close()
+    return code
+
+def use_promo_code(user_id, code):
+    conn = sqlite3.connect('users.db')
+    c = conn.cursor()
+    c.execute("SELECT days, used_by FROM promocodes WHERE code = ?", (code,))
+    res = c.fetchone()
+    if not res:
+        conn.close()
+        return False, "Промокод не найден"
+    days, used_by = res
+    if used_by:
+        conn.close()
+        return False, "Промокод уже использован"
+    c.execute("UPDATE promocodes SET used_by = ?, used_at = ? WHERE code = ?", (user_id, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), code))
+    conn.commit()
+    conn.close()
+    set_sub(user_id, days)
+    return True, f"Подписка активирована на {days} дней"
+
+def get_promocodes():
+    conn = sqlite3.connect('users.db')
+    c = conn.cursor()
+    c.execute("SELECT code, days, used_by, created_at FROM promocodes ORDER BY created_at DESC")
+    res = c.fetchall()
+    conn.close()
+    return res
+
 def check_user(user_id):
     conn = sqlite3.connect('users.db')
     c = conn.cursor()
-    c.execute('SELECT user_id FROM users WHERE user_id = ?', (user_id,))
-    res = c.fetchone()
+    c.execute("INSERT OR IGNORE INTO users (user_id, subscribe) VALUES (?, 'None')", (user_id,))
+    conn.commit()
     conn.close()
-    return res is not None
+    return True
 
 def extract_channel_and_id(url):
     try:
@@ -132,29 +245,30 @@ async def send_reports(chat_username, msg_id, user_id):
             await client.disconnect()
             continue
 
-    bot.send_message(user_id, f"🚀 Готово!\n✅ Удачно: {ok}\n❌ Ошибок: {fail}\n🌊 Flood: {flood}", reply_markup=back_markup)
+    bot.send_message(user_id, f"🚀 Готово!\n✅ Успешно: {ok}\n❌ Ошибок: {fail}\n🌊 Flood: {flood}", reply_markup=back_markup)
 
 # ========== КОМАНДЫ БОТА ==========
 @bot.message_handler(commands=['start'])
 def start(msg):
+    uid = msg.chat.id
+    username = msg.from_user.username or ""
+    first_name = msg.from_user.first_name or ""
+    check_user(uid)
+    
     conn = sqlite3.connect('users.db')
     c = conn.cursor()
-    c.execute('''CREATE TABLE IF NOT EXISTS users(user_id BIGINT, subscribe DATETIME)''')
-    uid = msg.chat.id
-    c.execute("SELECT user_id FROM users WHERE user_id = ?", (uid,))
-    if not c.fetchone():
-        c.execute("INSERT INTO users VALUES(?, ?)", (uid, "1999-01-01 20:00:00"))
-        conn.commit()
-    bot.send_message(uid, "⚡️ Бот запущен", reply_markup=menu, parse_mode="Markdown")
+    c.execute("UPDATE users SET username = ?, first_name = ? WHERE user_id = ?", (username, first_name, uid))
+    conn.commit()
     conn.close()
+    
+    bot.send_message(uid, "⚡️ Бот запущен!\nКупи подписку или введи промокод.", reply_markup=menu, parse_mode="Markdown")
 
 @bot.callback_query_handler(lambda c: c.data and c.data.startswith('sub_'))
 def handle_sub(call):
     uid = call.from_user.id
-    if not check_user(uid):
-        bot.send_message(uid, "❌ Ошибка")
-        return
+    check_user(uid)
     typ = call.data.split('_')[1]
+    
     if typ == "1":
         inv = crypto.create_invoice('USDT', 2)
         days = "1"
@@ -178,76 +292,122 @@ def handle_sub(call):
     markup.add(types.InlineKeyboardButton("💸 Оплатить", url=payurl),
                types.InlineKeyboardButton("✅ Проверить", callback_data=f"check_{inv_id}_{days}"),
                back)
-    bot.edit_message_text(f"Оплата {days} дней, {amount}$", call.message.chat.id, call.message.message_id, reply_markup=markup)
+    bot.edit_message_text(f"💸 Оплата {days} дней, {amount}$", call.message.chat.id, call.message.message_id, reply_markup=markup)
 
 @bot.callback_query_handler(lambda c: c.data and c.data.startswith('check_'))
 def check_pay(call):
     uid = call.from_user.id
-    if not check_user(uid):
-        return
     _, inv_id, days = call.data.split('_')
     try:
         inv = crypto.get_invoices(invoice_ids=inv_id)
         if inv['items'][0]['status'] == 'paid':
-            conn = sqlite3.connect('users.db')
-            c = conn.cursor()
-            new_date = (datetime.now() + timedelta(days=int(days))).strftime("%Y-%m-%d %H:%M:%S")
-            c.execute("UPDATE users SET subscribe = ? WHERE user_id = ?", (new_date, uid))
-            conn.commit()
-            conn.close()
-            bot.edit_message_text("✅ Оплачено!", call.message.chat.id, call.message.message_id, reply_markup=back_markup)
+            new_date = set_sub(uid, int(days) if days != "9999" else 9999)
+            bot.edit_message_text("✅ Оплачено! Подписка активна.", call.message.chat.id, call.message.message_id, reply_markup=back_markup)
+            bot.send_message(config.bot_logs, f"💰 Оплата от {uid} на {days} дней")
         else:
-            bot.answer_callback_query(call.id, "⏳ Не оплачено", show_alert=True)
+            bot.answer_callback_query(call.id, "⏳ Ещё не оплачено", show_alert=True)
     except:
         bot.answer_callback_query(call.id, "❌ Ошибка", show_alert=True)
+
+@bot.callback_query_handler(lambda c: c.data == 'enter_promo')
+def enter_promo(call):
+    uid = call.from_user.id
+    check_user(uid)
+    msg = bot.send_message(uid, "🎫 Введите промокод:")
+    bot.register_next_step_handler(msg, process_promo)
+
+def process_promo(msg):
+    uid = msg.from_user.id
+    code = msg.text.strip().upper()
+    success, message = use_promo_code(uid, code)
+    if success:
+        bot.send_message(uid, f"✅ {message}", reply_markup=menu)
+    else:
+        bot.send_message(uid, f"❌ {message}", reply_markup=shop_markup)
+
+@bot.callback_query_handler(lambda c: c.data == 'add_promo' and c.from_user.id in config.ADMINS)
+def add_promo_cmd(call):
+    uid = call.from_user.id
+    msg = bot.send_message(uid, "🎫 Введите количество дней для промокода:")
+    bot.register_next_step_handler(msg, add_promo_days)
+
+def add_promo_days(msg):
+    if msg.from_user.id not in config.ADMINS:
+        return
+    try:
+        days = int(msg.text)
+        code = create_promo_code(days, msg.from_user.id)
+        bot.send_message(msg.chat.id, f"✅ Промокод создан:\n`{code}`\nНа {days} дней", parse_mode="Markdown")
+    except:
+        bot.send_message(msg.chat.id, "❌ Ошибка. Введите число.")
+
+@bot.callback_query_handler(lambda c: c.data == 'view_promos' and c.from_user.id in config.ADMINS)
+def view_promos(call):
+    promos = get_promocodes()
+    if not promos:
+        bot.send_message(call.from_user.id, "📋 Промокодов нет")
+        return
+    text = "📋 **Список промокодов:**\n\n"
+    for code, days, used_by, created_at in promos:
+        status = "❌ Использован" if used_by else "✅ Активен"
+        text += f"`{code}` - {days} дней - {status}\n"
+    bot.send_message(call.from_user.id, text, parse_mode="Markdown")
 
 @bot.callback_query_handler(func=lambda call: True)
 def main_callback(call):
     uid = call.from_user.id
-    if not check_user(uid):
-        bot.send_message(uid, "❌ Ошибка")
-        return
-    conn = sqlite3.connect('users.db')
-    c = conn.cursor()
-    sub_str = c.execute("SELECT subscribe FROM users WHERE user_id = ?", (uid,)).fetchone()[0]
-    sub_date = datetime.strptime(sub_str, "%Y-%m-%d %H:%M:%S")
+    check_user(uid)
+    sub_status = get_sub_status(uid)
+    has_active = has_sub(uid)
 
     if call.data == 'snoser':
-        if sub_date < datetime.now():
-            bot.send_message(uid, "⏳ Подписка истекла")
-            conn.close()
+        if not has_active:
+            bot.send_message(uid, "❌ У вас нет активной подписки!\nКупите подписку или введите промокод.", reply_markup=shop_markup)
             return
         if uid in last_used and (datetime.now() - last_used[uid]) < timedelta(minutes=5):
             sec = int((timedelta(minutes=5) - (datetime.now() - last_used[uid])).total_seconds())
             bot.send_message(uid, f"⏳ Ждите {sec} секунд")
-            conn.close()
             return
         last_used[uid] = datetime.now()
         m = bot.send_message(uid, "🔗 Введите ссылку на сообщение:")
         bot.register_next_step_handler(m, process_link)
     elif call.data == 'back':
-        bot.edit_message_text("⚡️ Меню", call.message.chat.id, call.message.message_id, reply_markup=menu)
+        bot.edit_message_text("⚡️ Главное меню", call.message.chat.id, call.message.message_id, reply_markup=menu)
     elif call.data == 'profile':
-        bot.edit_message_text(f"👤 ID: {uid}\n📅 Подписка до: {sub_date}", call.message.chat.id, call.message.message_id, reply_markup=back_markup)
+        if sub_status and sub_status != "None" and sub_status != "0":
+            try:
+                sub_date = datetime.strptime(sub_status, "%Y-%m-%d %H:%M:%S")
+                if sub_date > datetime.now():
+                    remaining = sub_date - datetime.now()
+                    days = remaining.days
+                    hours = remaining.seconds // 3600
+                    text = f"👤 ID: {uid}\n📅 Подписка активна до: {sub_date}\n⏰ Осталось: {days} дн. {hours} ч."
+                else:
+                    text = f"👤 ID: {uid}\n❌ Подписка не активна"
+            except:
+                text = f"👤 ID: {uid}\n❌ Подписка не активна"
+        else:
+            text = f"👤 ID: {uid}\n❌ Подписка не активна"
+        bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=back_markup)
     elif call.data == 'shop':
-        bot.edit_message_text("💸 Цены:\n1 день — 2$\n7 дней — 7$\n30 дней — 15$\nНавсегда — 30$", call.message.chat.id, call.message.message_id, reply_markup=shop_markup)
+        bot.edit_message_text("💸 **Магазин подписок:**\n\n1 день — 2$\n7 дней — 7$\n30 дней — 15$\nНавсегда — 30$\n\n🎫 Есть промокод? Введи его ниже.", 
+                              call.message.chat.id, call.message.message_id, reply_markup=shop_markup, parse_mode="Markdown")
     elif call.data == 'add_subsribe' and call.from_user.id in config.ADMINS:
-        m = bot.send_message(uid, "Введите ID пользователя:")
+        m = bot.send_message(uid, "➕ Введите ID пользователя и количество дней через пробел:\nПример: `123456789 30`", parse_mode="Markdown")
         bot.register_next_step_handler(m, add_sub2)
     elif call.data == 'clear_subscribe' and call.from_user.id in config.ADMINS:
-        m = bot.send_message(uid, "Введите ID пользователя:")
+        m = bot.send_message(uid, "❌ Введите ID пользователя для удаления подписки:")
         bot.register_next_step_handler(m, clear_sub2)
     elif call.data == 'send_all' and call.from_user.id in config.ADMINS:
-        m = bot.send_message(uid, "Введите текст рассылки:")
+        m = bot.send_message(uid, "📢 Введите текст рассылки:")
         bot.register_next_step_handler(m, send_all_text)
-    conn.close()
 
 def process_link(msg):
     url = msg.text
     uid = msg.from_user.id
     try:
         ch, mid = extract_channel_and_id(url)
-        bot.send_message(uid, "🚀 Запускаю...")
+        bot.send_message(uid, "🚀 Запускаю обход...")
         asyncio.run(send_reports(ch, mid, uid))
     except ValueError:
         bot.send_message(uid, "❌ Неверная ссылка")
@@ -255,32 +415,26 @@ def process_link(msg):
 def add_sub2(msg):
     if msg.from_user.id not in config.ADMINS:
         return
-    uid = int(msg.text)
-    m2 = bot.send_message(msg.chat.id, "Введите количество дней:")
-    bot.register_next_step_handler(m2, add_sub3, uid)
-
-def add_sub3(msg, uid):
-    if msg.from_user.id not in config.ADMINS:
-        return
-    days = int(msg.text)
-    conn = sqlite3.connect('users.db')
-    c = conn.cursor()
-    new_date = (datetime.now() + timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
-    c.execute("UPDATE users SET subscribe = ? WHERE user_id = ?", (new_date, uid))
-    conn.commit()
-    conn.close()
-    bot.send_message(msg.chat.id, "✅ Готово")
+    try:
+        parts = msg.text.split()
+        uid = int(parts[0])
+        days = int(parts[1])
+        new_date = set_sub(uid, days, msg.from_user.id)
+        bot.send_message(msg.chat.id, f"✅ Пользователю {uid} выдана подписка на {days} дней")
+        bot.send_message(uid, f"✅ Администратор выдал вам подписку на {days} дней!")
+    except:
+        bot.send_message(msg.chat.id, "❌ Ошибка. Используй: `123456789 30`", parse_mode="Markdown")
 
 def clear_sub2(msg):
     if msg.from_user.id not in config.ADMINS:
         return
-    uid = int(msg.text)
-    conn = sqlite3.connect('users.db')
-    c = conn.cursor()
-    c.execute("UPDATE users SET subscribe = ? WHERE user_id = ?", ("1999-01-01 20:00:00", uid))
-    conn.commit()
-    conn.close()
-    bot.send_message(msg.chat.id, "✅ Сброшено")
+    try:
+        uid = int(msg.text)
+        remove_sub(uid)
+        bot.send_message(msg.chat.id, f"✅ Подписка пользователя {uid} удалена")
+        bot.send_message(uid, "❌ Ваша подписка была удалена администратором")
+    except:
+        bot.send_message(msg.chat.id, "❌ Ошибка. Введите ID пользователя")
 
 def send_all_text(msg):
     if msg.from_user.id not in config.ADMINS:
@@ -292,7 +446,7 @@ def send_all_text(msg):
     ok = 0
     for u in users:
         try:
-            bot.send_message(u[0], txt)
+            bot.send_message(u[0], f"📢 **Рассылка**\n\n{txt}", parse_mode="Markdown")
             ok += 1
         except:
             pass
@@ -302,7 +456,7 @@ def send_all_text(msg):
 @bot.message_handler(commands=['admin'])
 def admin_panel(msg):
     if msg.from_user.id in config.ADMINS:
-        bot.send_message(msg.chat.id, "👑 Админ панель", reply_markup=admin_markup)
+        bot.send_message(msg.chat.id, "👑 **Админ панель**", reply_markup=admin_markup, parse_mode="Markdown")
 
 if __name__ == '__main__':
     print("🚀 Бот запущен")
