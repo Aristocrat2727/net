@@ -21,18 +21,19 @@ import config
 SESSIONS_URL = os.getenv('SESSIONS_URL')
 SESSION_FOLDER = config.SESSION_FOLDER
 
-if SESSIONS_URL:
+if SESSIONS_URL and not os.path.exists(SESSION_FOLDER):
     print("🔄 Загружаю сессии...")
     try:
         os.makedirs(SESSION_FOLDER, exist_ok=True)
+        print(f"📥 Скачиваю архив с {SESSIONS_URL}")
         r = requests.get(SESSIONS_URL, timeout=60)
         with zipfile.ZipFile(io.BytesIO(r.content)) as zf:
             zf.extractall(SESSION_FOLDER)
         
-        # Убираем вложенные папки
+        # Если внутри архива оказалась папка, перемещаем содержимое
         for item in os.listdir(SESSION_FOLDER):
             item_path = os.path.join(SESSION_FOLDER, item)
-            if os.path.isdir(item_path) and item == "sessions":
+            if os.path.isdir(item_path):
                 for subitem in os.listdir(item_path):
                     shutil.move(os.path.join(item_path, subitem), SESSION_FOLDER)
                 os.rmdir(item_path)
@@ -59,13 +60,15 @@ os.makedirs(session_folder, exist_ok=True)
 
 sessions = [f.replace('.session', '') for f in os.listdir(session_folder) if f.endswith('.session')]
 last_used = {}
+user_data = {}
 
 # ========== КЛАВИАТУРЫ ==========
 menu = types.InlineKeyboardMarkup(row_width=2)
 profile = types.InlineKeyboardButton("👤 Профиль", callback_data='profile')
 shop = types.InlineKeyboardButton("🛒 Подписка", callback_data='shop')
-snoser = types.InlineKeyboardButton("🚀 Запуск", callback_data='snoser')
-menu.add(profile, shop, snoser)
+snoser = types.InlineKeyboardButton("🚀 Жалоба на сообщение", callback_data='snoser')
+scam_btn = types.InlineKeyboardButton("🎭 Scam репорт (канал)", callback_data='scam_report')
+menu.add(profile, shop, snoser, scam_btn)
 
 back_markup = types.InlineKeyboardMarkup(row_width=1)
 back = types.InlineKeyboardButton("🔙 Назад", callback_data='back')
@@ -88,6 +91,16 @@ sub_6 = types.InlineKeyboardButton("Навсегда - 30$", callback_data='sub_
 promo_btn = types.InlineKeyboardButton("🎫 Ввести промокод", callback_data='enter_promo')
 shop_markup.add(sub_1, sub_2, sub_4, sub_6)
 shop_markup.add(promo_btn, back)
+
+scam_markup = types.InlineKeyboardMarkup(row_width=2)
+scam_markup.add(
+    types.InlineKeyboardButton("💸 Ложные финансовые обещания", callback_data="scam_reason_finance"),
+    types.InlineKeyboardButton("🎭 Выдача себя за другое лицо", callback_data="scam_reason_fake"),
+    types.InlineKeyboardButton("💀 Вредоносное ПО/фишинг", callback_data="scam_reason_malware"),
+    types.InlineKeyboardButton("📦 Сомнительный продавец", callback_data="scam_reason_seller"),
+    types.InlineKeyboardButton("🔄 Другое", callback_data="scam_reason_other")
+)
+scam_markup.add(back)
 
 # ========== БАЗА ДАННЫХ ==========
 def init_db():
@@ -218,7 +231,14 @@ def extract_channel_and_id(url):
     except:
         raise ValueError("Неверный формат")
 
-# ========== ОТПРАВКА ЖАЛОБ ==========
+def extract_channel_only(url):
+    try:
+        username = url.split('t.me/')[-1].split('/')[0].split('?')[0]
+        return username
+    except:
+        raise ValueError("Неверная ссылка на канал")
+
+# ========== ОТПРАВКА ЖАЛОБ НА СООБЩЕНИЕ ==========
 async def send_reports(chat_username, msg_id, user_id):
     ok = 0
     fail = 0
@@ -231,34 +251,25 @@ async def send_reports(chat_username, msg_id, user_id):
         return
 
     for ses in sessions:
-        print(f"🔍 Пробую сессию: {ses}")
         api_id = config.API_ID
         api_hash = config.API_HASH
         session_file = os.path.join(session_folder, ses + ".session")
         session_path = os.path.join(session_folder, ses)
 
         if not os.path.exists(session_file):
-            print(f"❌ Файл не найден: {session_file}")
             fail += 1
             continue
 
-        print(f"✅ Файл есть: {session_file}")
-        
         client = TelegramClient(session_path, api_id, api_hash, system_version='4.16.30-vxCUSTOM', sequential_updates=True)
 
         try:
-            print(f"🔌 Подключаюсь...")
             await client.connect()
             if not await client.is_user_authorized():
-                print(f"❌ Сессия не авторизована")
                 fail += 1
                 await client.disconnect()
                 continue
 
-            print(f"✅ Авторизована")
             chat = await client.get_entity(chat_username)
-            print(f"📢 Отправляю жалобу на сообщение {msg_id} в чат {chat_username}")
-            
             reason = random.choice(list(reasons_map.values()))
             
             await client(ReportRequest(
@@ -267,20 +278,68 @@ async def send_reports(chat_username, msg_id, user_id):
                 reason=reason,
                 message=""
             ))
-            print(f"✅ Жалоба отправлена")
             ok += 1
             await client.disconnect()
         except FloodWaitError as e:
-            print(f"🌊 FloodWait: {e.seconds} секунд")
             flood += 1
             await client.disconnect()
         except Exception as e:
-            print(f"❌ Ошибка: {type(e).__name__} - {e}")
             fail += 1
             await client.disconnect()
             continue
 
-    bot.send_message(user_id, f"🚀 Готово!\n✅ Успешно: {ok}\n❌ Ошибок: {fail}\n🌊 Flood: {flood}", reply_markup=back_markup)
+    bot.send_message(user_id, f"🚀 Жалоба на сообщение!\n✅ Успешно: {ok}\n❌ Ошибок: {fail}\n🌊 Flood: {flood}", reply_markup=back_markup)
+
+# ========== ОТПРАВКА ЖАЛОБ НА КАНАЛ (SCAM) ==========
+async def send_scam_report(channel, reason, comment, user_id):
+    ok = 0
+    fail = 0
+    
+    reason_map = {
+        'finance': 'Ложные финансовые обещания',
+        'fake': 'Выдача себя за другое лицо',
+        'malware': 'Вредоносное ПО/фишинг',
+        'seller': 'Сомнительный продавец',
+        'other': 'Другое'
+    }
+    reason_text = reason_map.get(reason, 'Мошенничество')
+    full_text = f"Reason: {reason_text}\nComment: {comment}" if comment else f"Reason: {reason_text}"
+    
+    for ses in sessions:
+        api_id = config.API_ID
+        api_hash = config.API_HASH
+        session_file = os.path.join(session_folder, ses + ".session")
+        session_path = os.path.join(session_folder, ses)
+        
+        if not os.path.exists(session_file):
+            fail += 1
+            continue
+        
+        client = TelegramClient(session_path, api_id, api_hash, system_version='4.16.30-vxCUSTOM', sequential_updates=True)
+        
+        try:
+            await client.connect()
+            if not await client.is_user_authorized():
+                fail += 1
+                await client.disconnect()
+                continue
+            
+            chat = await client.get_entity(channel)
+            
+            await client(ReportRequest(
+                peer=chat,
+                id=[],  # пустой = жалоба на весь канал
+                reason=InputReportReasonOther(),
+                message=full_text
+            ))
+            ok += 1
+            await client.disconnect()
+        except Exception as e:
+            fail += 1
+            await client.disconnect()
+            continue
+    
+    bot.send_message(user_id, f"🎭 Scam-репорт!\n✅ Успешно: {ok}\n❌ Ошибок: {fail}", reply_markup=back_markup)
 
 # ========== КОМАНДЫ БОТА ==========
 @bot.message_handler(commands=['start'])
@@ -402,17 +461,40 @@ def main_callback(call):
 
     if call.data == 'snoser':
         if not has_active:
-            bot.send_message(uid, "❌ У вас нет активной подписки!\nКупите подписку или введите промокод.", reply_markup=shop_markup)
+            bot.send_message(uid, "❌ У вас нет активной подписки!", reply_markup=shop_markup)
             return
         if uid in last_used and (datetime.now() - last_used[uid]) < timedelta(minutes=5):
             sec = int((timedelta(minutes=5) - (datetime.now() - last_used[uid])).total_seconds())
             bot.send_message(uid, f"⏳ Ждите {sec} секунд")
             return
         last_used[uid] = datetime.now()
-        m = bot.send_message(uid, "🔗 Введите ссылку на сообщение (формат https://t.me/username/12345):")
+        m = bot.send_message(uid, "🔗 Введите ссылку на сообщение:\nhttps://t.me/username/12345")
         bot.register_next_step_handler(m, process_link)
+    
+    elif call.data == 'scam_report':
+        if not has_active:
+            bot.send_message(uid, "❌ У вас нет активной подписки!", reply_markup=shop_markup)
+            return
+        if uid in last_used and (datetime.now() - last_used[uid]) < timedelta(minutes=5):
+            sec = int((timedelta(minutes=5) - (datetime.now() - last_used[uid])).total_seconds())
+            bot.send_message(uid, f"⏳ Ждите {sec} секунд")
+            return
+        last_used[uid] = datetime.now()
+        m = bot.send_message(uid, "🔗 Введите ссылку на **канал**:\nhttps://t.me/username")
+        bot.register_next_step_handler(m, process_scam_channel)
+    
+    elif call.data.startswith('scam_reason_'):
+        if uid not in user_data:
+            bot.send_message(uid, "❌ Ошибка, начните заново /start")
+            return
+        reason = call.data.split('_')[2]
+        user_data[uid]['scam_reason'] = reason
+        msg = bot.send_message(uid, "📝 Введите комментарий (или '-' чтобы пропустить):")
+        bot.register_next_step_handler(msg, process_scam_comment)
+    
     elif call.data == 'back':
         bot.edit_message_text("⚡️ Главное меню", call.message.chat.id, call.message.message_id, reply_markup=menu)
+    
     elif call.data == 'profile':
         sub_status = get_sub_status(uid)
         if sub_status and sub_status != "None" and sub_status != "0":
@@ -430,15 +512,19 @@ def main_callback(call):
         else:
             text = f"👤 ID: {uid}\n❌ Подписка не активна"
         bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=back_markup)
+    
     elif call.data == 'shop':
-        bot.edit_message_text("💸 **Магазин подписок:**\n\n1 день — 2$\n7 дней — 7$\n30 дней — 15$\nНавсегда — 30$\n\n🎫 Есть промокод? Введи его ниже.", 
+        bot.edit_message_text("💸 **Магазин подписок:**\n\n1 день — 2$\n7 дней — 7$\n30 дней — 15$\nНавсегда — 30$", 
                               call.message.chat.id, call.message.message_id, reply_markup=shop_markup, parse_mode="Markdown")
+    
     elif call.data == 'add_subsribe' and call.from_user.id in config.ADMINS:
         m = bot.send_message(uid, "➕ Введите ID пользователя и количество дней через пробел:\nПример: `123456789 30`", parse_mode="Markdown")
         bot.register_next_step_handler(m, add_sub2)
+    
     elif call.data == 'clear_subscribe' and call.from_user.id in config.ADMINS:
         m = bot.send_message(uid, "❌ Введите ID пользователя для удаления подписки:")
         bot.register_next_step_handler(m, clear_sub2)
+    
     elif call.data == 'send_all' and call.from_user.id in config.ADMINS:
         m = bot.send_message(uid, "📢 Введите текст рассылки:")
         bot.register_next_step_handler(m, send_all_text)
@@ -448,10 +534,38 @@ def process_link(msg):
     uid = msg.from_user.id
     try:
         ch, mid = extract_channel_and_id(url)
-        bot.send_message(uid, "🚀 Запускаю обход...")
+        bot.send_message(uid, "🚀 Запускаю жалобу на сообщение...")
         asyncio.run(send_reports(ch, mid, uid))
     except ValueError as e:
         bot.send_message(uid, f"❌ {e}")
+
+def process_scam_channel(msg):
+    uid = msg.from_user.id
+    url = msg.text.strip()
+    try:
+        channel = extract_channel_only(url)
+        user_data[uid] = {'scam_channel': channel}
+        bot.send_message(uid, "🎭 Выберите причину:", reply_markup=scam_markup)
+    except ValueError as e:
+        bot.send_message(uid, f"❌ {e}")
+
+def process_scam_comment(msg):
+    uid = msg.from_user.id
+    comment = msg.text.strip()
+    if comment == '-':
+        comment = ''
+    
+    if uid not in user_data or 'scam_channel' not in user_data or 'scam_reason' not in user_data:
+        bot.send_message(uid, "❌ Ошибка, начните заново /start")
+        return
+    
+    channel = user_data[uid]['scam_channel']
+    reason = user_data[uid]['scam_reason']
+    
+    bot.send_message(uid, "🎭 Запускаю Scam-репорт...")
+    asyncio.run(send_scam_report(channel, reason, comment, uid))
+    
+    del user_data[uid]
 
 def add_sub2(msg):
     if msg.from_user.id not in config.ADMINS:
