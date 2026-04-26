@@ -21,7 +21,7 @@ import config
 SESSIONS_URL = os.getenv('SESSIONS_URL')
 SESSION_FOLDER = config.SESSION_FOLDER
 
-if SESSIONS_URL and not os.path.exists(SESSION_FOLDER):
+if SESSIONS_URL:
     print("🔄 Загружаю сессии...")
     try:
         os.makedirs(SESSION_FOLDER, exist_ok=True)
@@ -29,10 +29,10 @@ if SESSIONS_URL and not os.path.exists(SESSION_FOLDER):
         with zipfile.ZipFile(io.BytesIO(r.content)) as zf:
             zf.extractall(SESSION_FOLDER)
         
-        # Если внутри архива оказалась папка, перемещаем содержимое
+        # Убираем вложенные папки
         for item in os.listdir(SESSION_FOLDER):
             item_path = os.path.join(SESSION_FOLDER, item)
-            if os.path.isdir(item_path):
+            if os.path.isdir(item_path) and item == "sessions":
                 for subitem in os.listdir(item_path):
                     shutil.move(os.path.join(item_path, subitem), SESSION_FOLDER)
                 os.rmdir(item_path)
@@ -218,19 +218,17 @@ def extract_channel_and_id(url):
     except:
         raise ValueError("Неверный формат")
 
-# ========== ОТПРАВКА ЖАЛОБ С ДИАГНОСТИКОЙ ==========
+# ========== ОТПРАВКА ЖАЛОБ ==========
 async def send_reports(chat_username, msg_id, user_id):
     ok = 0
     fail = 0
     flood = 0
 
-    # === ДИАГНОСТИКА ===
     print(f"🔍 Отладка: папка сессий = {session_folder}")
     print(f"🔍 Отладка: список сессий = {sessions}")
     if not sessions:
-        await bot.send_message(user_id, "❌ Нет сессий! Проверь SESSIONS_URL и архив.")
+        bot.send_message(user_id, "❌ Нет сессий! Проверь SESSIONS_URL и архив.")
         return
-    # ===================
 
     for ses in sessions:
         print(f"🔍 Пробую сессию: {ses}")
@@ -282,7 +280,7 @@ async def send_reports(chat_username, msg_id, user_id):
             await client.disconnect()
             continue
 
-    await bot.send_message(user_id, f"🚀 Готово!\n✅ Успешно: {ok}\n❌ Ошибок: {fail}\n🌊 Flood: {flood}", reply_markup=back_markup)
+    bot.send_message(user_id, f"🚀 Готово!\n✅ Успешно: {ok}\n❌ Ошибок: {fail}\n🌊 Flood: {flood}", reply_markup=back_markup)
 
 # ========== КОМАНДЫ БОТА ==========
 @bot.message_handler(commands=['start'])
