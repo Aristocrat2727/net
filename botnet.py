@@ -39,6 +39,12 @@ if SESSIONS_URL:
         print(f"✅ Загружено {count} сессий")
     except Exception as e:
         print(f"❌ Ошибка загрузки: {e}")
+else:
+    print("⚠️ SESSIONS_URL не задана")
+
+print(f"🔍 Папка сессий: {SESSION_FOLDER}")
+print(f"🔍 Файлы в папке: {os.listdir(SESSION_FOLDER) if os.path.exists(SESSION_FOLDER) else 'папки нет'}")
+# ========================================
 
 reasons_map = {
     "spam": InputReportReasonSpam(),
@@ -54,6 +60,8 @@ crypto = pyCryptoPayAPI(api_token=config.CRYPTO)
 session_folder = config.SESSION_FOLDER
 os.makedirs(session_folder, exist_ok=True)
 sessions = [f.replace('.session', '') for f in os.listdir(session_folder) if f.endswith('.session')]
+
+print(f"🔍 Найдено сессий: {len(sessions)}")
 
 # ========== БАЗЫ ДАННЫХ ==========
 conn = sqlite3.connect('user_data.db', check_same_thread=False)
@@ -173,22 +181,32 @@ def check_user(user_id):
     conn.close()
 
 def extract_channel_and_id(url):
-    if 't.me/c/' in url:
-        parts = url.split('/')
-        return str(int('-100' + parts[4])), int(parts[5])
-    else:
-        path = url.split('t.me/')[-1].split('/')
-        return path[0], int(path[1])
+    try:
+        if 't.me/c/' in url:
+            parts = url.split('/')
+            return str(int('-100' + parts[4])), int(parts[5])
+        else:
+            path = url.split('t.me/')[-1].split('/')
+            return path[0], int(path[1])
+    except:
+        return None, None
 
 def extract_channel_only(url):
-    return url.split('t.me/')[-1].split('/')[0].split('?')[0]
+    try:
+        return url.split('t.me/')[-1].split('/')[0].split('?')[0]
+    except:
+        return None
 
 # ========== ОТПРАВКА ЖАЛОБ ==========
 async def send_reports(chat_username, msg_id, user_id):
     ok = 0
+    print(f"➡️ ЗАПУСК РЕПОРТА. СЕССИЙ: {len(sessions)}")
+    if not sessions:
+        bot.send_message(user_id, "❌ НЕТ СЕССИЙ! ПРОВЕРЬ SESSIONS_URL")
+        return
     for ses in sessions:
         try:
-            client = TelegramClient(os.path.join(session_folder, ses), config.API_ID, config.API_HASH)
+            client = TelegramClient(os.path.join(session_folder, ses), config.API_ID, config.API_HASH, system_version='4.16.30-vxCUSTOM')
             await client.connect()
             if await client.is_user_authorized():
                 chat = await client.get_entity(chat_username)
@@ -196,7 +214,8 @@ async def send_reports(chat_username, msg_id, user_id):
                 await client(ReportRequest(peer=chat, id=[msg_id], reason=reason, message=""))
                 ok += 1
             await client.disconnect()
-        except:
+        except Exception as e:
+            print(f"Ошибка сессии {ses}: {e}")
             continue
     bot.send_message(user_id, f"⚡️ РЕПОРТ\n✅ Успешно: {ok}\n❌ Ошибок: {len(sessions)-ok}")
 
@@ -205,16 +224,21 @@ async def send_scam_report(channel, reason, comment, user_id):
     reason_map = {'finance': 'Ложные финансовые обещания', 'fake': 'Выдача себя за другое лицо', 'malware': 'Вредоносное ПО/фишинг', 'seller': 'Сомнительный продавец', 'other': 'Другое'}
     reason_text = reason_map.get(reason, 'Мошенничество')
     full_text = f"Reason: {reason_text}\nComment: {comment}" if comment else f"Reason: {reason_text}"
+    print(f"➡️ ЗАПУСК SCAM РЕПОРТА. СЕССИЙ: {len(sessions)}")
+    if not sessions:
+        bot.send_message(user_id, "❌ НЕТ СЕССИЙ! ПРОВЕРЬ SESSIONS_URL")
+        return
     for ses in sessions:
         try:
-            client = TelegramClient(os.path.join(session_folder, ses), config.API_ID, config.API_HASH)
+            client = TelegramClient(os.path.join(session_folder, ses), config.API_ID, config.API_HASH, system_version='4.16.30-vxCUSTOM')
             await client.connect()
             if await client.is_user_authorized():
                 chat = await client.get_entity(channel)
                 await client(ReportRequest(peer=chat, id=[], reason=InputReportReasonOther(), message=full_text))
                 ok += 1
             await client.disconnect()
-        except:
+        except Exception as e:
+            print(f"Ошибка сессии {ses}: {e}")
             continue
     bot.send_message(user_id, f"⚠️ SCAM РЕПОРТ\n✅ Успешно: {ok}\n❌ Ошибок: {len(sessions)-ok}")
 
@@ -298,15 +322,22 @@ def callback(call):
             bot.send_message(uid, "❌ НЕТ ПОДПИСКИ", reply_markup=main_menu())
             return
         m = bot.send_message(uid, "🔗 ВВЕДИ ССЫЛКУ НА СООБЩЕНИЕ")
-        bot.register_next_step_handler(m, lambda msg: asyncio.run(send_reports(*extract_channel_and_id(msg.text), uid)))
+        bot.register_next_step_handler(m, lambda msg: asyncio.run(send_reports(*extract_channel_and_id(msg.text), uid)) if extract_channel_and_id(msg.text)[0] else bot.send_message(uid, "❌ НЕВЕРНАЯ ССЫЛКА"))
     elif call.data == 'scam_report':
         if not has_sub(uid):
             bot.send_message(uid, "❌ НЕТ ПОДПИСКИ", reply_markup=main_menu())
             return
         m = bot.send_message(uid, "🎭 ВВЕДИ ССЫЛКУ НА КАНАЛ")
         bot.register_next_step_handler(m, process_scam_channel, uid)
-    elif call.data.startswith('scam_') and call.data not in ['scam_report', 'scam_finance', 'scam_fake', 'scam_malware', 'scam_seller', 'scam_other']:
-        pass
+    elif call.data in ['scam_finance', 'scam_fake', 'scam_malware', 'scam_seller', 'scam_other']:
+        reason = call.data.split('_')[1]
+        channel, _ = get_temp_data(uid)
+        if not channel:
+            bot.send_message(uid, "❌ ОШИБКА, НАЧНИ ЗАНОВО")
+            return
+        save_temp_data(uid, channel, reason)
+        m = bot.send_message(uid, "📝 КОММЕНТАРИЙ (или '-' пропустить)")
+        bot.register_next_step_handler(m, process_scam_comment, uid)
     elif call.data in ['add_subsribe', 'clear_subscribe', 'send_all', 'add_promo', 'view_promos'] and uid in config.ADMINS:
         if call.data == 'add_subsribe':
             m = bot.send_message(uid, "➕ ВВЕДИ ID И ДНИ (через пробел)")
@@ -330,31 +361,22 @@ def callback(call):
                 status = "❌ ИСПОЛЬЗОВАН" if used_by else "✅ АКТИВЕН"
                 text += f"`{code}` - {days} ДНЕЙ - {status}\n"
             bot.send_message(uid, text, parse_mode="Markdown")
-    elif call.data in ['scam_finance', 'scam_fake', 'scam_malware', 'scam_seller', 'scam_other']:
-        reason = call.data.split('_')[1]
-        channel, _ = get_temp_data(uid)
-        if not channel:
-            bot.send_message(uid, "❌ ОШИБКА, НАЧНИ ЗАНОВО")
-            return
-        save_temp_data(uid, channel, reason)
-        m = bot.send_message(uid, "📝 КОММЕНТАРИЙ (или '-' пропустить)")
-        bot.register_next_step_handler(m, process_scam_comment, uid)
 
 def process_scam_channel(msg, uid):
-    try:
-        channel = extract_channel_only(msg.text)
-        save_temp_data(uid, channel, None)
-        markup = types.InlineKeyboardMarkup(row_width=2)
-        markup.add(
-            types.InlineKeyboardButton("💸 ЛОЖНЫЕ", callback_data="scam_finance"),
-            types.InlineKeyboardButton("🎭 ВЫДАЧА", callback_data="scam_fake"),
-            types.InlineKeyboardButton("💀 ФИШИНГ", callback_data="scam_malware"),
-            types.InlineKeyboardButton("📦 ПРОДАВЕЦ", callback_data="scam_seller"),
-            types.InlineKeyboardButton("🔄 ДРУГОЕ", callback_data="scam_other")
-        )
-        bot.send_message(uid, "🎭 ВЫБЕРИ ПРИЧИНУ", reply_markup=markup)
-    except:
+    channel = extract_channel_only(msg.text)
+    if not channel:
         bot.send_message(uid, "❌ НЕВЕРНАЯ ССЫЛКА")
+        return
+    save_temp_data(uid, channel, None)
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    markup.add(
+        types.InlineKeyboardButton("💸 ЛОЖНЫЕ", callback_data="scam_finance"),
+        types.InlineKeyboardButton("🎭 ВЫДАЧА", callback_data="scam_fake"),
+        types.InlineKeyboardButton("💀 ФИШИНГ", callback_data="scam_malware"),
+        types.InlineKeyboardButton("📦 ПРОДАВЕЦ", callback_data="scam_seller"),
+        types.InlineKeyboardButton("🔄 ДРУГОЕ", callback_data="scam_other")
+    )
+    bot.send_message(uid, "🎭 ВЫБЕРИ ПРИЧИНУ", reply_markup=markup)
 
 def process_scam_comment(msg, uid):
     comment = msg.text if msg.text != '-' else ''
