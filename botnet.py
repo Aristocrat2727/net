@@ -6,6 +6,7 @@ import zipfile
 import requests
 import io
 import secrets
+import shutil
 from datetime import datetime, timedelta
 from telethon import TelegramClient
 from telethon.errors import FloodWaitError
@@ -27,6 +28,15 @@ if SESSIONS_URL and not os.path.exists(SESSION_FOLDER):
         r = requests.get(SESSIONS_URL, timeout=60)
         with zipfile.ZipFile(io.BytesIO(r.content)) as zf:
             zf.extractall(SESSION_FOLDER)
+        
+        # Если внутри архива оказалась папка, перемещаем содержимое
+        for item in os.listdir(SESSION_FOLDER):
+            item_path = os.path.join(SESSION_FOLDER, item)
+            if os.path.isdir(item_path):
+                for subitem in os.listdir(item_path):
+                    shutil.move(os.path.join(item_path, subitem), SESSION_FOLDER)
+                os.rmdir(item_path)
+        
         count = len([f for f in os.listdir(SESSION_FOLDER) if f.endswith('.session')])
         print(f"✅ Загружено {count} сессий")
     except Exception as e:
@@ -208,54 +218,71 @@ def extract_channel_and_id(url):
     except:
         raise ValueError("Неверный формат")
 
-# ========== ОТПРАВКА ЖАЛОБ (НА СООБЩЕНИЕ!) ==========
+# ========== ОТПРАВКА ЖАЛОБ С ДИАГНОСТИКОЙ ==========
 async def send_reports(chat_username, msg_id, user_id):
     ok = 0
     fail = 0
     flood = 0
 
+    # === ДИАГНОСТИКА ===
+    print(f"🔍 Отладка: папка сессий = {session_folder}")
+    print(f"🔍 Отладка: список сессий = {sessions}")
+    if not sessions:
+        await bot.send_message(user_id, "❌ Нет сессий! Проверь SESSIONS_URL и архив.")
+        return
+    # ===================
+
     for ses in sessions:
+        print(f"🔍 Пробую сессию: {ses}")
         api_id = config.API_ID
         api_hash = config.API_HASH
         session_file = os.path.join(session_folder, ses + ".session")
         session_path = os.path.join(session_folder, ses)
 
         if not os.path.exists(session_file):
+            print(f"❌ Файл не найден: {session_file}")
             fail += 1
             continue
 
+        print(f"✅ Файл есть: {session_file}")
+        
         client = TelegramClient(session_path, api_id, api_hash, system_version='4.16.30-vxCUSTOM', sequential_updates=True)
 
         try:
+            print(f"🔌 Подключаюсь...")
             await client.connect()
             if not await client.is_user_authorized():
+                print(f"❌ Сессия не авторизована")
                 fail += 1
                 await client.disconnect()
                 continue
 
+            print(f"✅ Авторизована")
             chat = await client.get_entity(chat_username)
+            print(f"📢 Отправляю жалобу на сообщение {msg_id} в чат {chat_username}")
             
-            # Выбираем случайную причину
             reason = random.choice(list(reasons_map.values()))
             
-            # ЖАЛОБА НА КОНКРЕТНОЕ СООБЩЕНИЕ
             await client(ReportRequest(
                 peer=chat,
                 id=[msg_id],
                 reason=reason,
                 message=""
             ))
+            print(f"✅ Жалоба отправлена")
             ok += 1
             await client.disconnect()
         except FloodWaitError as e:
+            print(f"🌊 FloodWait: {e.seconds} секунд")
             flood += 1
             await client.disconnect()
         except Exception as e:
+            print(f"❌ Ошибка: {type(e).__name__} - {e}")
             fail += 1
             await client.disconnect()
             continue
 
-    bot.send_message(user_id, f"🚀 Готово!\n✅ Успешно: {ok}\n❌ Ошибок: {fail}\n🌊 Flood: {flood}", reply_markup=back_markup)
+    await bot.send_message(user_id, f"🚀 Готово!\n✅ Успешно: {ok}\n❌ Ошибок: {fail}\n🌊 Flood: {flood}", reply_markup=back_markup)
 
 # ========== КОМАНДЫ БОТА ==========
 @bot.message_handler(commands=['start'])
