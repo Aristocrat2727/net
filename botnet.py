@@ -9,7 +9,7 @@ import secrets
 from datetime import datetime, timedelta
 from telethon import TelegramClient
 from telethon.errors import FloodWaitError
-from telethon.tl.functions.messages import ReportSpamRequest
+from telethon.tl.functions.messages import ReportRequest
 from telethon.tl.types import InputReportReasonSpam, InputReportReasonFake, InputReportReasonViolence, InputReportReasonChildAbuse, InputReportReasonOther
 import telebot
 from telebot import types
@@ -18,26 +18,28 @@ import config
 
 # ========== АВТОЗАГРУЗКА СЕССИЙ ==========
 SESSIONS_URL = os.getenv('SESSIONS_URL')
-if SESSIONS_URL and not os.path.exists(config.SESSION_FOLDER):
+SESSION_FOLDER = config.SESSION_FOLDER
+
+if SESSIONS_URL and not os.path.exists(SESSION_FOLDER):
     print("🔄 Загружаю сессии...")
     try:
-        os.makedirs(config.SESSION_FOLDER, exist_ok=True)
+        os.makedirs(SESSION_FOLDER, exist_ok=True)
         r = requests.get(SESSIONS_URL, timeout=60)
         with zipfile.ZipFile(io.BytesIO(r.content)) as zf:
-            zf.extractall(config.SESSION_FOLDER)
-        count = len([f for f in os.listdir(config.SESSION_FOLDER) if f.endswith('.session')])
+            zf.extractall(SESSION_FOLDER)
+        count = len([f for f in os.listdir(SESSION_FOLDER) if f.endswith('.session')])
         print(f"✅ Загружено {count} сессий")
     except Exception as e:
         print(f"❌ Ошибка загрузки: {e}")
 # ========================================
 
-reasons = [
-    InputReportReasonSpam(),
-    InputReportReasonFake(),
-    InputReportReasonViolence(),
-    InputReportReasonChildAbuse(),
-    InputReportReasonOther()
-]
+reasons_map = {
+    "spam": InputReportReasonSpam(),
+    "fake": InputReportReasonFake(),
+    "violence": InputReportReasonViolence(),
+    "child": InputReportReasonChildAbuse(),
+    "other": InputReportReasonOther()
+}
 
 bot = telebot.TeleBot(config.TOKEN)
 crypto = pyCryptoPayAPI(api_token=config.CRYPTO)
@@ -106,9 +108,7 @@ def get_sub_status(user_id):
     c.execute("SELECT subscribe FROM users WHERE user_id = ?", (user_id,))
     res = c.fetchone()
     conn.close()
-    if not res:
-        return None
-    return res[0]
+    return res[0] if res else None
 
 def has_sub(user_id):
     sub = get_sub_status(user_id)
@@ -120,7 +120,7 @@ def has_sub(user_id):
     except:
         return False
 
-def set_sub(user_id, days, admin_id=None):
+def set_sub(user_id, days):
     conn = sqlite3.connect('users.db')
     c = conn.cursor()
     current = get_sub_status(user_id)
@@ -202,13 +202,13 @@ def extract_channel_and_id(url):
             return str(chat_id), msg_id
         else:
             path = url[len('https://t.me/'):].split('/')
-            if len(path) == 2:
+            if len(path) >= 2:
                 return path[0], int(path[1])
         raise ValueError("Неверный формат")
     except:
         raise ValueError("Неверный формат")
 
-# ========== ОТПРАВКА ЖАЛОБ ==========
+# ========== ОТПРАВКА ЖАЛОБ (НА СООБЩЕНИЕ!) ==========
 async def send_reports(chat_username, msg_id, user_id):
     ok = 0
     fail = 0
@@ -234,13 +234,23 @@ async def send_reports(chat_username, msg_id, user_id):
                 continue
 
             chat = await client.get_entity(chat_username)
-            await client(ReportSpamRequest(peer=chat))
+            
+            # Выбираем случайную причину
+            reason = random.choice(list(reasons_map.values()))
+            
+            # ЖАЛОБА НА КОНКРЕТНОЕ СООБЩЕНИЕ
+            await client(ReportRequest(
+                peer=chat,
+                id=[msg_id],
+                reason=reason,
+                message=""
+            ))
             ok += 1
             await client.disconnect()
         except FloodWaitError as e:
             flood += 1
             await client.disconnect()
-        except Exception:
+        except Exception as e:
             fail += 1
             await client.disconnect()
             continue
@@ -281,10 +291,14 @@ def handle_sub(call):
         inv = crypto.create_invoice('USDT', 15)
         days = "30"
         amount = 15
-    else:
+    elif typ == "6":
         inv = crypto.create_invoice('USDT', 30)
         days = "9999"
         amount = 30
+    else:
+        inv = crypto.create_invoice('USDT', 2)
+        days = "1"
+        amount = 2
 
     payurl = inv['pay_url']
     inv_id = inv['invoice_id']
@@ -301,9 +315,11 @@ def check_pay(call):
     try:
         inv = crypto.get_invoices(invoice_ids=inv_id)
         if inv['items'][0]['status'] == 'paid':
-            new_date = set_sub(uid, int(days) if days != "9999" else 9999)
+            days_int = int(days) if days != "9999" else 9999
+            set_sub(uid, days_int)
             bot.edit_message_text("✅ Оплачено! Подписка активна.", call.message.chat.id, call.message.message_id, reply_markup=back_markup)
-            bot.send_message(config.bot_logs, f"💰 Оплата от {uid} на {days} дней")
+            if config.bot_logs:
+                bot.send_message(config.bot_logs, f"💰 Оплата от {uid} на {days} дней")
         else:
             bot.answer_callback_query(call.id, "⏳ Ещё не оплачено", show_alert=True)
     except:
@@ -357,7 +373,6 @@ def view_promos(call):
 def main_callback(call):
     uid = call.from_user.id
     check_user(uid)
-    sub_status = get_sub_status(uid)
     has_active = has_sub(uid)
 
     if call.data == 'snoser':
@@ -369,11 +384,12 @@ def main_callback(call):
             bot.send_message(uid, f"⏳ Ждите {sec} секунд")
             return
         last_used[uid] = datetime.now()
-        m = bot.send_message(uid, "🔗 Введите ссылку на сообщение:")
+        m = bot.send_message(uid, "🔗 Введите ссылку на сообщение (формат https://t.me/username/12345):")
         bot.register_next_step_handler(m, process_link)
     elif call.data == 'back':
         bot.edit_message_text("⚡️ Главное меню", call.message.chat.id, call.message.message_id, reply_markup=menu)
     elif call.data == 'profile':
+        sub_status = get_sub_status(uid)
         if sub_status and sub_status != "None" and sub_status != "0":
             try:
                 sub_date = datetime.strptime(sub_status, "%Y-%m-%d %H:%M:%S")
@@ -381,7 +397,7 @@ def main_callback(call):
                     remaining = sub_date - datetime.now()
                     days = remaining.days
                     hours = remaining.seconds // 3600
-                    text = f"👤 ID: {uid}\n📅 Подписка активна до: {sub_date}\n⏰ Осталось: {days} дн. {hours} ч."
+                    text = f"👤 ID: {uid}\n📅 Подписка до: {sub_date}\n⏰ Осталось: {days} дн. {hours} ч."
                 else:
                     text = f"👤 ID: {uid}\n❌ Подписка не активна"
             except:
@@ -409,8 +425,8 @@ def process_link(msg):
         ch, mid = extract_channel_and_id(url)
         bot.send_message(uid, "🚀 Запускаю обход...")
         asyncio.run(send_reports(ch, mid, uid))
-    except ValueError:
-        bot.send_message(uid, "❌ Неверная ссылка")
+    except ValueError as e:
+        bot.send_message(uid, f"❌ {e}")
 
 def add_sub2(msg):
     if msg.from_user.id not in config.ADMINS:
@@ -419,7 +435,7 @@ def add_sub2(msg):
         parts = msg.text.split()
         uid = int(parts[0])
         days = int(parts[1])
-        new_date = set_sub(uid, days, msg.from_user.id)
+        set_sub(uid, days)
         bot.send_message(msg.chat.id, f"✅ Пользователю {uid} выдана подписка на {days} дней")
         bot.send_message(uid, f"✅ Администратор выдал вам подписку на {days} дней!")
     except:
