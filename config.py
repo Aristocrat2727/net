@@ -8,3 +8,5 @@ API_ID = int(os.getenv('API_ID'))
 API_HASH = os.getenv('API_HASH')
 
 SESSION_FOLDER = os.getenv('SESSION_FOLDER', '/app/sessions')
+
+bot_logs = os.getenv('BOT_LOGS')
