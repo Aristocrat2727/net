@@ -1,3 +1,4 @@
+import sqlite3
 import os
 import random
 import asyncio
@@ -6,7 +7,6 @@ import requests
 import io
 import secrets
 import shutil
-import json
 from datetime import datetime, timedelta
 from telethon import TelegramClient
 from telethon.tl.functions.messages import ReportRequest
@@ -15,19 +15,14 @@ import telebot
 from telebot import types
 from pyCryptoPayAPI import pyCryptoPayAPI
 import config
-import firebase_admin
-from firebase_admin import credentials, firestore
 
-# ========== FIREBASE ==========
-FIREBASE_JSON = os.getenv('FIREBASE_JSON')
-if not FIREBASE_JSON:
-    raise Exception("❌ Нет переменной FIREBASE_JSON!")
-cred_dict = json.loads(FIREBASE_JSON)
-cred = credentials.Certificate(cred_dict)
-firebase_admin.initialize_app(cred)
-db = firestore.client()
+# ========== ПУТИ К БАЗАМ (в Volume) ==========
+DATA_DIR = '/app/data'
+os.makedirs(DATA_DIR, exist_ok=True)
+USERS_DB = os.path.join(DATA_DIR, 'users.db')
+TEMP_DB = os.path.join(DATA_DIR, 'temp.db')
 
-# ========== ЗАГРУЗКА СЕССИЙ ==========
+# ========== АВТОЗАГРУЗКА СЕССИЙ ==========
 SESSIONS_URL = os.getenv('SESSIONS_URL')
 SESSION_FOLDER = config.SESSION_FOLDER
 
@@ -57,22 +52,33 @@ os.makedirs(session_folder, exist_ok=True)
 sessions = [f.replace('.session', '') for f in os.listdir(session_folder) if f.endswith('.session')]
 print(f"🔍 Найдено сессий: {len(sessions)}")
 
-# ========== BOT ==========
-bot = telebot.TeleBot(config.TOKEN)
-crypto = pyCryptoPayAPI(api_token=config.CRYPTO)
+# ========== SQLite ФУНКЦИИ ==========
+def init_db():
+    conn = sqlite3.connect(USERS_DB)
+    c = conn.cursor()
+    c.execute('''CREATE TABLE IF NOT EXISTS users(
+        user_id INTEGER PRIMARY KEY,
+        subscribe TEXT
+    )''')
+    c.execute('''CREATE TABLE IF NOT EXISTS promocodes(
+        code TEXT PRIMARY KEY,
+        days INTEGER,
+        created_by INTEGER,
+        used_by INTEGER,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )''')
+    conn.commit()
+    conn.close()
 
-reasons_map = {
-    "spam": InputReportReasonSpam(),
-    "fake": InputReportReasonFake(),
-    "violence": InputReportReasonViolence(),
-    "child": InputReportReasonChildAbuse(),
-    "other": InputReportReasonOther()
-}
+init_db()
 
-# ========== FIREBASE ФУНКЦИИ ==========
 def get_sub(user_id):
-    doc = db.collection('users').document(str(user_id)).get()
-    return doc.to_dict().get('subscribe') if doc.exists else None
+    conn = sqlite3.connect(USERS_DB)
+    c = conn.cursor()
+    c.execute("SELECT subscribe FROM users WHERE user_id = ?", (user_id,))
+    row = c.fetchone()
+    conn.close()
+    return row[0] if row else None
 
 def has_sub(user_id):
     sub = get_sub(user_id)
@@ -84,49 +90,76 @@ def has_sub(user_id):
         return False
 
 def set_sub(user_id, days):
-    current = get_sub(user_id)
-    if current and current != 'None':
+    conn = sqlite3.connect(USERS_DB)
+    c = conn.cursor()
+    c.execute("SELECT subscribe FROM users WHERE user_id = ?", (user_id,))
+    row = c.fetchone()
+    if row and row[0] and row[0] != 'None':
         try:
-            old = datetime.strptime(current, "%Y-%m-%d %H:%M:%S")
+            old = datetime.strptime(row[0], "%Y-%m-%d %H:%M:%S")
             new_date = max(old, datetime.now()) + timedelta(days=days)
         except:
             new_date = datetime.now() + timedelta(days=days)
     else:
         new_date = datetime.now() + timedelta(days=days)
     new_date_str = new_date.strftime("%Y-%m-%d %H:%M:%S")
-    db.collection('users').document(str(user_id)).set({'subscribe': new_date_str}, merge=True)
-    return new_date_str
+    c.execute("INSERT OR REPLACE INTO users (user_id, subscribe) VALUES (?, ?)", (user_id, new_date_str))
+    conn.commit()
+    conn.close()
 
 def remove_sub(user_id):
-    db.collection('users').document(str(user_id)).set({'subscribe': 'None'}, merge=True)
+    conn = sqlite3.connect(USERS_DB)
+    c = conn.cursor()
+    c.execute("UPDATE users SET subscribe = 'None' WHERE user_id = ?", (user_id,))
+    conn.commit()
+    conn.close()
 
 def create_promo(days, admin_id):
     code = secrets.token_hex(8).upper()
-    db.collection('promocodes').document(code).set({
-        'days': days,
-        'used_by': None,
-        'created_by': admin_id,
-        'created_at': firestore.SERVER_TIMESTAMP
-    })
+    conn = sqlite3.connect(USERS_DB)
+    c = conn.cursor()
+    c.execute("INSERT INTO promocodes (code, days, created_by) VALUES (?, ?, ?)", (code, days, admin_id))
+    conn.commit()
+    conn.close()
     return code
 
 def use_promo(user_id, code):
-    doc = db.collection('promocodes').document(code.upper()).get()
-    if not doc.exists:
+    conn = sqlite3.connect(USERS_DB)
+    c = conn.cursor()
+    c.execute("SELECT days, used_by FROM promocodes WHERE code = ?", (code,))
+    row = c.fetchone()
+    if not row:
+        conn.close()
         return False, "❌ Промокод не найден"
-    data = doc.to_dict()
-    if data.get('used_by'):
+    days, used_by = row
+    if used_by:
+        conn.close()
         return False, "❌ Промокод уже использован"
-    set_sub(user_id, data['days'])
-    db.collection('promocodes').document(code.upper()).update({
-        'used_by': user_id,
-        'used_at': firestore.SERVER_TIMESTAMP
-    })
-    return True, f"✅ Подписка активирована на {data['days']} дней"
+    set_sub(user_id, days)
+    c.execute("UPDATE promocodes SET used_by = ? WHERE code = ?", (user_id, code))
+    conn.commit()
+    conn.close()
+    return True, f"✅ Подписка активирована на {days} дней"
 
 def get_promos():
-    docs = db.collection('promocodes').order_by('created_at', direction=firestore.Query.DESCENDING).stream()
-    return [(d.id, d.to_dict().get('days'), d.to_dict().get('used_by')) for d in docs]
+    conn = sqlite3.connect(USERS_DB)
+    c = conn.cursor()
+    c.execute("SELECT code, days, used_by FROM promocodes ORDER BY created_at DESC")
+    rows = c.fetchall()
+    conn.close()
+    return rows
+
+# ========== BOT ==========
+bot = telebot.TeleBot(config.TOKEN)
+crypto = pyCryptoPayAPI(api_token=config.CRYPTO)
+
+reasons_map = {
+    "spam": InputReportReasonSpam(),
+    "fake": InputReportReasonFake(),
+    "violence": InputReportReasonViolence(),
+    "child": InputReportReasonChildAbuse(),
+    "other": InputReportReasonOther()
+}
 
 # ========== ВИЗУАЛ ==========
 def main_menu():
@@ -155,53 +188,15 @@ def admin_btns():
     )
     return m
 
-# ========== ОТПРАВКА ==========
-async def send_report(chat, msg_id, user_id):
-    ok = 0
-    for ses in sessions:
-        try:
-            client = TelegramClient(os.path.join(session_folder, ses), config.API_ID, config.API_HASH)
-            await client.connect()
-            if await client.is_user_authorized():
-                entity = await client.get_entity(chat)
-                reason = random.choice(list(reasons_map.values()))
-                await client(ReportRequest(peer=entity, id=[msg_id], reason=reason, message=""))
-                ok += 1
-            await client.disconnect()
-        except:
-            continue
-    bot.send_message(user_id, f"⚡️ РЕПОРТ\n✅ {ok}\n❌ {len(sessions)-ok}")
-
-async def send_scam(channel, reason, comment, user_id):
-    ok = 0
-    reasons = {
-        'finance': 'Ложные финансовые обещания',
-        'fake': 'Выдача себя за другое лицо',
-        'malware': 'Вредоносное ПО/фишинг',
-        'seller': 'Сомнительный продавец',
-        'other': 'Другое'
-    }
-    text = reasons.get(reason, 'Мошенничество')
-    if comment:
-        text += f"\nComment: {comment}"
-    for ses in sessions:
-        try:
-            client = TelegramClient(os.path.join(session_folder, ses), config.API_ID, config.API_HASH)
-            await client.connect()
-            if await client.is_user_authorized():
-                entity = await client.get_entity(channel)
-                await client(ReportRequest(peer=entity, id=[], reason=InputReportReasonOther(), message=text))
-                ok += 1
-            await client.disconnect()
-        except:
-            continue
-    bot.send_message(user_id, f"⚠️ SCAM\n✅ {ok}\n❌ {len(sessions)-ok}")
-
-# ========== ХЭНДЛЕРЫ ==========
 @bot.message_handler(commands=['start'])
 def start(m):
-    db.collection('users').document(str(m.chat.id)).set({}, merge=True)
-    bot.send_message(m.chat.id, "🔥 *БОТ АКТИВИРОВАН*\nВыбери действие 👇", reply_markup=main_menu(), parse_mode='Markdown')
+    uid = m.chat.id
+    conn = sqlite3.connect(USERS_DB)
+    c = conn.cursor()
+    c.execute("INSERT OR IGNORE INTO users (user_id, subscribe) VALUES (?, 'None')", (uid,))
+    conn.commit()
+    conn.close()
+    bot.send_message(uid, "🔥 *БОТ АКТИВИРОВАН*\nВыбери действие 👇", reply_markup=main_menu(), parse_mode='Markdown')
 
 @bot.callback_query_handler(func=lambda c: True)
 def handle(call):
@@ -254,7 +249,7 @@ def handle(call):
             bot.send_message(uid, "❌ *НЕТ ПОДПИСКИ*", reply_markup=main_menu(), parse_mode='Markdown')
             return
         m = bot.send_message(uid, "🎭 *ВВЕДИ ССЫЛКУ НА КАНАЛ*", parse_mode='Markdown')
-        bot.register_next_step_handler(m, lambda msg: process_scam_channel(msg, uid))
+        bot.register_next_step_handler(m, process_scam_channel, uid)
     elif call.data in ['add_sub', 'remove_sub', 'send_all', 'promo_create', 'promo_list'] and uid in config.ADMINS:
         if call.data == 'add_sub':
             m = bot.send_message(uid, "➕ *ID И ДНИ (через пробел)*", parse_mode='Markdown')
@@ -278,18 +273,8 @@ def handle(call):
                 status = "❌ ИСПОЛЬЗОВАН" if used else "✅ АКТИВЕН"
                 text += f"`{code}` - {days} ДНЕЙ - {status}\n"
             bot.send_message(uid, text, parse_mode='Markdown')
-    elif call.data.startswith('scam_reason_'):
-        reason = call.data.split('_')[2]
-        channel = temp_data.get(uid, {}).get('channel')
-        if not channel:
-            bot.send_message(uid, "❌ *ОШИБКА, НАЧНИ ЗАНОВО*", parse_mode='Markdown')
-            return
-        temp_data[uid]['reason'] = reason
-        m = bot.send_message(uid, "📝 *КОММЕНТАРИЙ (или '-' пропустить)*", parse_mode='Markdown')
-        bot.register_next_step_handler(m, lambda msg: scam_comment(msg, uid))
 
-temp_data = {}
-
+# ========== ВСПОМОГАТЕЛЬНЫЕ ==========
 def process_report(msg, uid):
     url = msg.text
     try:
@@ -301,7 +286,22 @@ def process_report(msg, uid):
             path = url.split('t.me/')[-1].split('/')
             chat = path[0]
             mid = int(path[1])
-        asyncio.run(send_report(chat, mid, uid))
+        async def send():
+            ok = 0
+            for ses in sessions:
+                try:
+                    client = TelegramClient(os.path.join(session_folder, ses), config.API_ID, config.API_HASH)
+                    await client.connect()
+                    if await client.is_user_authorized():
+                        entity = await client.get_entity(chat)
+                        reason = random.choice(list(reasons_map.values()))
+                        await client(ReportRequest(peer=entity, id=[mid], reason=reason, message=""))
+                        ok += 1
+                    await client.disconnect()
+                except:
+                    continue
+            bot.send_message(uid, f"⚡️ РЕПОРТ\n✅ {ok}\n❌ {len(sessions)-ok}")
+        asyncio.run(send())
     except:
         bot.send_message(uid, "❌ *НЕВЕРНАЯ ССЫЛКА*", parse_mode='Markdown')
 
@@ -328,10 +328,37 @@ def scam_comment(msg, uid):
     if not data.get('channel') or not data.get('reason'):
         bot.send_message(uid, "❌ *ОШИБКА, НАЧНИ ЗАНОВО*", parse_mode='Markdown')
         return
-    asyncio.run(send_scam(data['channel'], data['reason'], comment, uid))
+    channel = data['channel']
+    reason = data['reason']
+    reasons_text = {
+        'finance': 'Ложные финансовые обещания',
+        'fake': 'Выдача себя за другое лицо',
+        'malware': 'Вредоносное ПО/фишинг',
+        'seller': 'Сомнительный продавец',
+        'other': 'Другое'
+    }
+    text = reasons_text.get(reason, 'Мошенничество')
+    if comment:
+        text += f"\nComment: {comment}"
+    async def send():
+        ok = 0
+        for ses in sessions:
+            try:
+                client = TelegramClient(os.path.join(session_folder, ses), config.API_ID, config.API_HASH)
+                await client.connect()
+                if await client.is_user_authorized():
+                    entity = await client.get_entity(channel)
+                    await client(ReportRequest(peer=entity, id=[], reason=InputReportReasonOther(), message=text))
+                    ok += 1
+                await client.disconnect()
+            except:
+                continue
+        bot.send_message(uid, f"⚠️ SCAM\n✅ {ok}\n❌ {len(sessions)-ok}")
+    asyncio.run(send())
     del temp_data[uid]
 
-# ========== АДМИН ФУНКЦИИ ==========
+temp_data = {}
+
 def add_sub(m):
     if m.from_user.id not in config.ADMINS:
         return
@@ -357,11 +384,14 @@ def rem_sub(m):
 def send_all(m):
     if m.from_user.id not in config.ADMINS:
         return
-    users = db.collection('users').stream()
+    conn = sqlite3.connect(USERS_DB)
+    c = conn.cursor()
+    users = c.execute("SELECT user_id FROM users").fetchall()
+    conn.close()
     ok = 0
     for user in users:
         try:
-            bot.send_message(int(user.id), f"📢 *РАССЫЛКА*\n\n{m.text}", parse_mode='Markdown')
+            bot.send_message(user[0], f"📢 *РАССЫЛКА*\n\n{m.text}", parse_mode='Markdown')
             ok += 1
         except:
             pass
@@ -382,7 +412,6 @@ def admin_panel(m):
     if m.from_user.id in config.ADMINS:
         bot.send_message(m.chat.id, "👑 *АДМИН ПАНЕЛЬ*", reply_markup=admin_btns(), parse_mode='Markdown')
 
-# ========== ЗАПУСК ==========
 if __name__ == '__main__':
-    print("🚀 БОТ ЗАПУЩЕН НА FIREBASE")
+    print("🚀 БОТ ЗАПУЩЕН (SQLite + Volume)")
     bot.infinity_polling()
