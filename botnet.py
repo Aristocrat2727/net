@@ -9,7 +9,7 @@ import secrets
 import shutil
 from datetime import datetime, timedelta
 from telethon import TelegramClient
-from telethon.errors import FloodWaitError, RPCError
+from telethon.errors import FloodWaitError
 from telethon.tl.functions.messages import ReportRequest
 from telethon.tl.types import (
     InputReportReasonSpam, InputReportReasonFake,
@@ -21,28 +21,41 @@ from telebot import types
 from pyCryptoPayAPI import pyCryptoPayAPI
 import config
 
-# ========== ПУТИ (ВСЁ В /app/data) ==========
-DATA_DIR = '/app/data'
-os.makedirs(DATA_DIR, exist_ok=True)
-USERS_DB = os.path.join(DATA_DIR, 'users.db')
-SESSION_FOLDER = os.path.join(DATA_DIR, 'sessions')
-os.makedirs(SESSION_FOLDER, exist_ok=True)
+# ========== ПУТИ ==========
+os.makedirs(config.DATA_DIR, exist_ok=True)
+os.makedirs(config.SESSION_FOLDER, exist_ok=True)
+USERS_DB = os.path.join(config.DATA_DIR, 'users.db')
 
 # ========== АВТОЗАГРУЗКА СЕССИЙ ==========
+print(f"🔍 SESSIONS_URL: {config.SESSIONS_URL if config.SESSIONS_URL else 'НЕ ЗАДАНА'}", flush=True)
+
 if config.SESSIONS_URL:
     print("🔄 Загружаю сессии...", flush=True)
     try:
-        if os.path.exists(SESSION_FOLDER):
-            shutil.rmtree(SESSION_FOLDER)
-        os.makedirs(SESSION_FOLDER, exist_ok=True)
+        if os.path.exists(config.SESSION_FOLDER):
+            shutil.rmtree(config.SESSION_FOLDER)
+        os.makedirs(config.SESSION_FOLDER, exist_ok=True)
+        
         r = requests.get(config.SESSIONS_URL, timeout=60)
-        with zipfile.ZipFile(io.BytesIO(r.content)) as zf:
-            zf.extractall(SESSION_FOLDER)
-        print("✅ Сессии загружены", flush=True)
+        print(f"📦 Скачано {len(r.content)} байт", flush=True)
+        
+        if len(r.content) < 100 or r.content[:2] != b'PK':
+            print("❌ Ошибка: URL не ведёт на ZIP-архив", flush=True)
+        else:
+            with zipfile.ZipFile(io.BytesIO(r.content)) as zf:
+                zf.extractall(config.SESSION_FOLDER)
+            
+            nested = os.path.join(config.SESSION_FOLDER, 'sessions')
+            if os.path.isdir(nested):
+                for f in os.listdir(nested):
+                    shutil.move(os.path.join(nested, f), config.SESSION_FOLDER)
+                os.rmdir(nested)
+            
+            print(f"✅ Сессии загружены", flush=True)
     except Exception as e:
         print(f"❌ Ошибка загрузки: {e}", flush=True)
 
-sessions = [f.replace('.session', '') for f in os.listdir(SESSION_FOLDER) if f.endswith('.session')]
+sessions = [f.replace('.session', '') for f in os.listdir(config.SESSION_FOLDER) if f.endswith('.session')]
 print(f"🔍 Найдено сессий: {len(sessions)}", flush=True)
 
 # ========== SQLite ФУНКЦИИ ==========
@@ -210,8 +223,8 @@ def shop_menu():
     )
     return m
 
-# ========== ФУНКЦИИ ОТПРАВКИ ЖАЛОБ ==========
-async def send_report(chat_username, message_id, user_id, is_channel=False, custom_text=""):
+# ========== ОТПРАВКА ЖАЛОБ ==========
+async def send_reports(chat_username, message_id, user_id, is_channel=False, custom_text=""):
     api_id = config.API_ID
     api_hash = config.API_HASH
     proxy = get_proxy_config()
@@ -223,7 +236,7 @@ async def send_report(chat_username, message_id, user_id, is_channel=False, cust
         reason = random.choice(list(reasons_map.values()))
         try:
             client = TelegramClient(
-                os.path.join(SESSION_FOLDER, session),
+                os.path.join(config.SESSION_FOLDER, session),
                 api_id, api_hash,
                 proxy=proxy,
                 system_version='4.16.30-vxCUSTOM'
@@ -266,14 +279,14 @@ def start(m):
     c.execute("INSERT OR IGNORE INTO users (user_id, subscribe) VALUES (?, 'None')", (uid,))
     conn.commit()
     conn.close()
-    bot.send_message(uid, "🔥 *БОТ АКТИВИРОВАН*\nВыбери действие 👇", reply_markup=main_menu(), parse_mode='Markdown')
+    bot.send_message(uid, "✅ *БОТ АКТИВИРОВАН*\nВыбери действие 👇", reply_markup=main_menu(), parse_mode='Markdown')
 
 @bot.callback_query_handler(func=lambda c: True)
 def handle(call):
     uid = call.from_user.id
     
     if call.data == 'back':
-        bot.edit_message_text("🔥 *ГЛАВНОЕ МЕНЮ*", call.message.chat.id, call.message.message_id, reply_markup=main_menu(), parse_mode='Markdown')
+        bot.edit_message_text("✅ *ГЛАВНОЕ МЕНЮ*", call.message.chat.id, call.message.message_id, reply_markup=main_menu(), parse_mode='Markdown')
     
     elif call.data == 'profile':
         sub = get_sub(uid) or 'Нет'
@@ -316,16 +329,16 @@ def handle(call):
             return
         last_used[uid] = datetime.now()
         m = bot.send_message(uid, "🔗 *ВВЕДИ ССЫЛКУ НА СООБЩЕНИЕ*\nПример: https://t.me/username/123", parse_mode='Markdown')
-        bot.register_next_step_handler(m, lambda msg: asyncio.run(send_report(msg.text.split('t.me/')[-1].split('/')[0], int(msg.text.split('/')[-1]), uid)))
+        bot.register_next_step_handler(m, lambda msg: asyncio.run(send_reports(msg.text.split('t.me/')[-1].split('/')[0], int(msg.text.split('/')[-1]), uid)))
     
     elif call.data == 'scam_channel':
         if not has_sub(uid):
             bot.send_message(uid, "❌ *НЕТ ПОДПИСКИ*", reply_markup=main_menu(), parse_mode='Markdown')
             return
         m = bot.send_message(uid, "🔗 *ВВЕДИ ССЫЛКУ НА КАНАЛ*\nПример: t.me/durov", parse_mode='Markdown')
-        bot.register_next_step_handler(m, lambda msg: asyncio.run(send_report(msg.text.strip().replace('https://t.me/', '').replace('@', ''), None, uid, is_channel=True, custom_text=config.SCAM_TEXT)))
+        bot.register_next_step_handler(m, lambda msg: asyncio.run(send_reports(msg.text.strip().replace('https://t.me/', '').replace('@', ''), None, uid, is_channel=True, custom_text=config.SCAM_TEXT)))
     
-    # Админ команды
+    # АДМИН КОМАНДЫ
     elif uid in config.ADMINS:
         if call.data == 'add_sub':
             m = bot.send_message(uid, "➕ *ID И ДНИ (через пробел)*", parse_mode='Markdown')
